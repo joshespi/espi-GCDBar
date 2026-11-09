@@ -1,0 +1,73 @@
+name: Update interface version
+
+# Checks Blizzard's version servers every day. When Retail or WoW Forever moves to
+# a new patch (or a newer PTR opens), it bumps ## Interface in GCDBar.toc, cuts a
+# patch release and starts release.yml, so the addon never shows "out of date".
+
+on:
+  schedule:
+    - cron: "23 15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: interface-update
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # GitHub turns off scheduled workflows after 60 days without repo activity;
+      # re-enabling through the API each run resets that clock
+      - name: Keep the schedule alive
+        continue-on-error: true
+        run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/interface-update.yml/enable"
+
+      - uses: p3lim/toc-interface-updater@v4
+        with:
+          flavor: |
+            retail
+            forever
+          ptr: true
+
+      - name: Release the new interface version
+        run: |
+          if git diff --quiet -- GCDBar.toc; then
+            echo "Interface version is current."
+            exit 0
+          fi
+          git diff -- GCDBar.toc
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          last=$(git describe --tags --abbrev=0) \
+            || { echo "::error::No release tag yet. Tag the first release yourself."; exit 1; }
+          if [ -n "$(git rev-list "${last}..HEAD")" ]; then
+            git commit -am "Update interface version"
+            git push origin HEAD
+            echo "::error::Interface updated on ${GITHUB_REF_NAME}, but there are unreleased commits since ${last}, so no release was made. Tag one yourself when ready."
+            exit 1
+          fi
+
+          cur=$(sed -n 's/^## Version: *v\{0,1\}//p' GCDBar.toc | tr -d '[:space:]')
+          next="${cur%.*}.$(( ${cur##*.} + 1 ))"
+          sed -i "s/^## Version: .*/## Version: ${next}/" GCDBar.toc
+          awk -v v="$next" \
+            'NR == 1 { print; print ""; print "## " v; print ""; print "- Updated for the latest game patch."; next } { print }' \
+            CHANGELOG.md > CHANGELOG.new
+          mv CHANGELOG.new CHANGELOG.md
+
+          git commit -am "release ${next}"
+          git tag "$next"
+          # atomic: if main moved since checkout, push neither the commit nor the tag
+          git push --atomic origin HEAD "refs/tags/${next}"
+          gh workflow run release.yml --ref "$next"
