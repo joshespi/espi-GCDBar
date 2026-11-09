@@ -1,11 +1,14 @@
-## Interface: 120100, 120007
+## Interface: 120105, 120107, 16001
 ## Title: GCDBar
 ## Notes: Global cooldown bar near your character.
 ## Author: Josh Espinoza
-## Version: 1.1.0
+## Version: 1.2.0
 ## Category: Combat
 ## IconTexture: Interface\Icons\Spell_Nature_TimeStop
 ## SavedVariables: GCDBarDB
+## AddonCompartmentFunc: GCDBar_OnAddonCompartmentClick
+## AddonCompartmentFuncOnEnter: GCDBar_OnAddonCompartmentEnter
+## AddonCompartmentFuncOnLeave: GCDBar_OnAddonCompartmentLeave
 ## X-Curse-Project-ID: 1742134
 
 GCDBar.lua

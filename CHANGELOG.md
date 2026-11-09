@@ -1,5 +1,14 @@
 # GCDBar
 
+## 1.2.0
+
+- Supports WoW Forever (1.60.1) and Retail 12.1.5, plus the 12.1.7 PTR.
+- The interface version now updates automatically with each game patch, so GCDBar shouldn't show as out of date.
+- Opens from the addons menu by the minimap: left-click for settings, right-click to lock or unlock.
+- "Lock bar" option in the settings panel.
+- `/gcd lock` and `/gcd unlock` confirm in chat.
+- More resilient to API changes: an event or function missing from a client no longer stops the addon from loading.
+
 ## 1.1.0
 
 - `/gcd stats` now keeps your last 10 fights and shows the last, the average and the best. `/gcd stats reset` clears them.
