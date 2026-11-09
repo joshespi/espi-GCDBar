@@ -27,6 +27,10 @@ local prefDefaults = {
     hideVehicle = false,
     hideMounted = false,
 }
+local allDefaults = {}
+for _, t in ipairs({ layoutDefaults, prefDefaults }) do
+    for k, v in pairs(t) do allDefaults[k] = v end
+end
 
 local db
 local endTime, total, queueWindow = 0, 1, 0.4
@@ -44,6 +48,18 @@ local winStart, busyUntil, idle = nil, 0, 0
 local function Print(msg)
     print("|cffffcc00GCDBar:|r " .. msg)
 end
+
+-- API lookups: use the current name, fall back to the older one, so a rename
+-- on any client (Retail, Forever, future patches) degrades instead of erroring
+local GetCooldown = (C_Spell and C_Spell.GetSpellCooldown) or function(spellID)
+    if not GetSpellCooldown then return end
+    local start, duration, enabled, modRate = GetSpellCooldown(spellID)
+    if start then
+        return { startTime = start, duration = duration, isEnabled = enabled == 1 or enabled == true, modRate = modRate }
+    end
+end
+local GetCVarValue = (C_CVar and C_CVar.GetCVar) or GetCVar
+local GetMetadata = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
 
 local function AnySecret(...)
     if not issecretvalue then return false end
@@ -80,11 +96,11 @@ end
 
 -- read the GCD into endTime/total and feed the tracker; true while it is running
 local function ReadGCD()
-    local cd = C_Spell.GetSpellCooldown(GCD_SPELL)
+    local cd = GetCooldown(GCD_SPELL)
     gcdSecret = cd and AnySecret(cd.startTime, cd.duration, cd.isEnabled, cd.modRate)
     if gcdSecret and not secretWarned then
         secretWarned = true
-        Print("GCD values are secret on this patch, bar disabled.")
+        Print("the game is hiding GCD timing right now, so the bar stays hidden until it can read it again.")
     end
     if not cd or gcdSecret or not cd.isEnabled or cd.duration == 0 then
         endTime = 0
@@ -97,7 +113,7 @@ local function ReadGCD()
 end
 
 local function ReadQueueWindow()
-    queueWindow = (tonumber(GetCVar("SpellQueueWindow")) or 400) / 1000
+    queueWindow = (tonumber(GetCVarValue and GetCVarValue("SpellQueueWindow")) or 400) / 1000
 end
 
 local function FormatFight(f)
@@ -193,8 +209,8 @@ end
 local function Suppressed()
     if not db.locked then return false end
     if db.combatOnly and not UnitAffectingCombat("player") then return true end
-    if db.hideVehicle and UnitInVehicle("player") then return true end
-    if db.hideMounted and IsMounted() then return true end
+    if db.hideVehicle and UnitInVehicle and UnitInVehicle("player") then return true end
+    if db.hideMounted and IsMounted and IsMounted() then return true end
     return false
 end
 
@@ -269,30 +285,36 @@ local function SetLocked(locked)
     end
 end
 
+-- push every db value to the UI; SetLocked refreshes the bar when locked
 local function ApplyAll()
     ApplyLayout()
     ApplyAppearance()
-    Refresh()
+    SetLocked(db.locked)
 end
+
+local lockSetting
 
 -- Settings panel; the slash commands remain the fallback if this API shifts
 local function BuildSettings()
     local category = Settings.RegisterVerticalLayoutCategory("GCDBar")
 
     local function Add(key, name, tooltip, slider)
+        local default = allDefaults[key]
         local setting = Settings.RegisterAddOnSetting(category, "GCDBar_" .. key, key, db,
-            type(prefDefaults[key] ~= nil and prefDefaults[key] or layoutDefaults[key]), name,
-            prefDefaults[key] ~= nil and prefDefaults[key] or layoutDefaults[key])
+            type(default), name, default)
         if slider then
             local opts = Settings.CreateSliderOptions(slider[1], slider[2], slider[3])
-            opts:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right)
+            local labels = MinimalSliderWithSteppersMixin and MinimalSliderWithSteppersMixin.Label
+            if labels and labels.Right then opts:SetLabelFormatter(labels.Right) end
             Settings.CreateSlider(category, setting, opts, tooltip)
         else
             Settings.CreateCheckbox(category, setting, tooltip)
         end
         setting:SetValueChangedCallback(ApplyAll)
+        return setting
     end
 
+    lockSetting = Add("locked", "Lock bar", "Uncheck to show the bar and drag it into place.")
     Add("width", "Width", "Bar width in pixels.", { SIZE_LIMITS.minW, SIZE_LIMITS.maxW, 5 })
     Add("height", "Height", "Bar height in pixels.", { SIZE_LIMITS.minH, SIZE_LIMITS.maxH, 1 })
     Add("alpha", "Opacity", "Bar opacity.", { 0.1, 1, 0.05 })
@@ -309,19 +331,59 @@ local function BuildSettings()
     settingsCategory = category
 end
 
+local function OpenOptions()
+    if settingsCategory and pcall(Settings.OpenToCategory, settingsCategory:GetID()) then return end
+    Print("settings panel unavailable, use the slash commands (/gcd)")
+end
+
+local function Lock(locked)
+    -- go through the setting so an open settings panel shows the new state
+    if lockSetting and db.locked ~= locked then
+        pcall(lockSetting.SetValue, lockSetting, locked)
+    end
+    SetLocked(locked)
+    Print(locked and "bar locked" or "bar unlocked, drag to move")
+end
+
+-- Addon compartment (the addons button by the minimap), wired up in the TOC
+function GCDBar_OnAddonCompartmentClick(_, button)
+    if not db then return end
+    if button == "RightButton" then Lock(not db.locked) else OpenOptions() end
+end
+
+function GCDBar_OnAddonCompartmentEnter(_, frame)
+    GameTooltip:SetOwner(frame, "ANCHOR_LEFT")
+    GameTooltip:SetText("GCDBar")
+    GameTooltip:AddLine("Left-click: settings", 1, 1, 1)
+    GameTooltip:AddLine("Right-click: lock / unlock", 1, 1, 1)
+    GameTooltip:Show()
+end
+
+function GCDBar_OnAddonCompartmentLeave()
+    GameTooltip:Hide()
+end
+
 bar:SetScript("OnDragStart", function(self) self:StartMoving() end)
 bar:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing()
     SavePosition()
 end)
 
-bar:RegisterEvent("ADDON_LOADED")
-bar:RegisterEvent("PLAYER_ENTERING_WORLD")
-bar:RegisterEvent("SPELL_UPDATE_COOLDOWN")
-bar:RegisterEvent("PLAYER_REGEN_DISABLED")
-bar:RegisterEvent("PLAYER_REGEN_ENABLED")
-bar:RegisterEvent("PLAYER_MOUNT_DISPLAY_CHANGED")
-bar:RegisterEvent("CVAR_UPDATE")
+-- an event this client doesn't have (renamed, or missing on another flavor)
+-- would raise an error and stop the whole addon loading; skip it instead
+local function Listen(event, unit)
+    if unit then
+        pcall(bar.RegisterUnitEvent, bar, event, unit)
+    else
+        pcall(bar.RegisterEvent, bar, event)
+    end
+end
+
+for _, event in ipairs({
+    "ADDON_LOADED", "PLAYER_ENTERING_WORLD", "SPELL_UPDATE_COOLDOWN",
+    "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED",
+    "PLAYER_MOUNT_DISPLAY_CHANGED", "CVAR_UPDATE",
+}) do Listen(event) end
 
 local CAST_EVENTS = {
     UNIT_SPELLCAST_START = MarkCast, UNIT_SPELLCAST_DELAYED = MarkCast,
@@ -330,9 +392,9 @@ local CAST_EVENTS = {
     UNIT_SPELLCAST_STOP = TrimBusy, UNIT_SPELLCAST_INTERRUPTED = TrimBusy,
     UNIT_SPELLCAST_CHANNEL_STOP = TrimBusy, UNIT_SPELLCAST_EMPOWER_STOP = TrimBusy,
 }
-for event in pairs(CAST_EVENTS) do bar:RegisterUnitEvent(event, "player") end
-bar:RegisterUnitEvent("UNIT_ENTERED_VEHICLE", "player")
-bar:RegisterUnitEvent("UNIT_EXITED_VEHICLE", "player")
+for event in pairs(CAST_EVENTS) do Listen(event, "player") end
+Listen("UNIT_ENTERED_VEHICLE", "player")
+Listen("UNIT_EXITED_VEHICLE", "player")
 
 bar:SetScript("OnEvent", function(self, event, arg1)
     if CAST_EVENTS[event] then
@@ -343,10 +405,8 @@ bar:SetScript("OnEvent", function(self, event, arg1)
         if arg1 ~= ADDON then return end
         GCDBarDB = GCDBarDB or {}
         db = GCDBarDB
-        for _, defaults in ipairs({ layoutDefaults, prefDefaults }) do
-            for k, v in pairs(defaults) do
-                if db[k] == nil then db[k] = v end
-            end
+        for k, v in pairs(allDefaults) do
+            if db[k] == nil then db[k] = v end
         end
         db.history = db.history or {}
         if db.lastFight then -- pre-1.1 saved data
@@ -360,15 +420,13 @@ bar:SetScript("OnEvent", function(self, event, arg1)
         else
             ReadGCD()
         end
-        ApplyLayout()
-        ApplyAppearance()
-        SetLocked(db.locked)
+        ApplyAll()
         pcall(BuildSettings)
         return
     end
     if not db then return end
     if event == "CVAR_UPDATE" then
-        if arg1 ~= "SpellQueueWindow" then return end
+        -- arg1's name/case varies by client; re-reading one CVar is cheap
         ReadQueueWindow()
         return
     elseif event == "PLAYER_REGEN_DISABLED" then
@@ -392,7 +450,7 @@ local HELP = {
     "/gcd report [on|off|<seconds>] - chat report after fights",
     "/gcd reset - default position and size",
     "/gcd stats [reset] - GCD idle % of recent fights",
-    "/gcd options - open the settings panel",
+    "/gcd options - open the settings panel (also in the addons menu by the minimap)",
 }
 
 local HIDE_RULES = { combat = "combatOnly", vehicle = "hideVehicle", mounted = "hideMounted" }
@@ -403,10 +461,8 @@ SLASH_GCDBAR1 = "/gcd"
 SLASH_GCDBAR2 = "/gcdbar"
 SlashCmdList.GCDBAR = function(msg)
     local cmd, a, b = strtrim(msg or ""):lower():match("^(%S*)%s*(%S*)%s*(%S*)")
-    if cmd == "unlock" then
-        SetLocked(false)
-    elseif cmd == "lock" then
-        SetLocked(true)
+    if cmd == "unlock" or cmd == "lock" then
+        Lock(cmd == "lock")
     elseif cmd == "size" then
         local w, h = tonumber(a), tonumber(b)
         if not w or not h or w <= 0 or h <= 0 then
@@ -465,13 +521,9 @@ SlashCmdList.GCDBAR = function(msg)
         Print("position and size reset")
         ApplyAll()
     elseif cmd == "options" or cmd == "config" then
-        if settingsCategory then
-            Settings.OpenToCategory(settingsCategory:GetID())
-        else
-            Print("settings panel unavailable, use the slash commands")
-        end
+        OpenOptions()
     else
-        local ver = C_AddOns.GetAddOnMetadata(ADDON, "Version") or "?"
+        local ver = GetMetadata and GetMetadata(ADDON, "Version") or "?"
         Print(ver:find("^@") and "dev" or "v" .. (ver:gsub("^v", "")))
         for _, line in ipairs(HELP) do Print(line) end
     end
